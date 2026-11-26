@@ -1,4 +1,4 @@
-# Only package.json, package-lock.json, tsconfig.json, and src/ are needed to build the image.
+# Only package.json, package-lock.json, tsconfig.json, prisma.config.mjs, prisma/, and src/ are needed to build the image.
 node_modules
 dist
 coverage

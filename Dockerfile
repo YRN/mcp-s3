@@ -9,15 +9,31 @@
 
 ARG NODE_IMAGE=node:24-alpine
 
-# --- build: compile TypeScript --------------------------------------------------
+# Targets: runtime (default, the server) and migrate (one-off `prisma migrate deploy`, see README):
+#   docker build -t mcp-s3 .
+#   docker build --target migrate -t mcp-s3-migrate .
+
+# --- build: generate the Prisma client, compile TypeScript -----------------------
 FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-# --ignore-scripts: no dependency needs an install script to compile (tsc is plain JS).
+# --ignore-scripts: no dependency needs an install script to compile (tsc and the Prisma client
+# generator are plain JS/WASM; the client uses no native query engine).
 RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY tsconfig.json ./
+COPY tsconfig.json prisma.config.mjs ./
+COPY prisma ./prisma
 COPY src ./src
+# prisma generate (src/generated/prisma) then tsc. Generating needs no database URL.
 RUN npm run build
+
+# --- migrate: applies prisma/migrations, then exits (run on demand, never at server start) ---
+# Reuses the build stage (it already has the prisma CLI as a devDependency). The CLI needs its
+# schema-engine binary, which an --ignore-scripts install skips: rebuild @prisma/engines to
+# download it now, at build time, so that running the container needs no internet access.
+FROM build AS migrate
+RUN apk add --no-cache openssl && npm rebuild @prisma/engines
+USER node
+CMD ["npx", "prisma", "migrate", "deploy"]
 
 # --- deps: production dependencies only -------------------------------------------
 FROM ${NODE_IMAGE} AS deps

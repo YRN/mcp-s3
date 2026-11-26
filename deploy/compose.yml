@@ -56,6 +56,27 @@ services:
     networks:
       - internal
 
+  # One-off: creates/updates the audit table. Run it before the first start with the audit
+  # database and after upgrades that add migrations:
+  #   docker compose -f deploy/compose.yml --profile audit-db --profile migrate run --rm migrate
+  # The server never runs migrations itself. Needs a database user that may create tables.
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: migrate
+    image: mcp-s3-migrate:latest
+    profiles: ["migrate"]
+    env_file: mcp-s3.env
+    depends_on:
+      - postgres
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - internal
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

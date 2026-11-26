@@ -1,7 +1,8 @@
-import pg from "pg";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 import type { AuditRecord, AuditStore } from "./audit.js";
 import { errorLogFields } from "./errors.js";
+import { PrismaClient } from "./generated/prisma/client.js";
 import { log } from "./logger.js";
 import type { Secret } from "./secret.js";
 
@@ -10,9 +11,12 @@ import type { Secret } from "./secret.js";
  * call: a record that cannot be saved is not retried, because audit.ts has already written the
  * same line to stderr. Error messages from the driver are never logged (errorLogFields), so the
  * connection URL, user, and host stay out of the logs.
+ *
+ * The table is created by Prisma migrations (prisma/migrations, `prisma migrate deploy`), never by
+ * the server. The database user only needs INSERT (and SELECT 1 for the startup check).
  */
 
-export const AUDIT_TABLE = "mcp_s3_audit";
+export const AUDIT_TABLE = "mcp_s3_audit_log";
 
 /** Records waiting for the database beyond this number are not saved (bounds memory use). */
 const MAX_PENDING = 1_000;
@@ -22,35 +26,25 @@ const CLOSE_TIMEOUT_MS = 3_000;
 /** At most one "could not save" warning per this period. */
 const WARN_INTERVAL_MS = 60_000;
 
-const TABLE_EXISTS_SQL = `SELECT to_regclass('${AUDIT_TABLE}') IS NOT NULL AS present`;
+/** One row of the audit table, in the shape Prisma expects (see prisma/schema.prisma). */
+export interface AuditRow {
+  time: Date;
+  tool: string;
+  path: string | null;
+  source: string | null;
+  destination: string | null;
+  result: "ok" | "error";
+  code: string | null;
+  bytes: bigint | null;
+  durationMs: bigint;
+}
 
-// Sent as one query, so it runs in one transaction; the advisory lock keeps instances that
-// start at the same time from creating the table concurrently.
-const CREATE_SQL = `
-SELECT pg_advisory_xact_lock(hashtext('${AUDIT_TABLE}'));
-CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE} (
-  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  time        timestamptz NOT NULL,
-  tool        text NOT NULL,
-  path        text,
-  source      text,
-  destination text,
-  result      text NOT NULL CHECK (result IN ('ok', 'error')),
-  code        text,
-  bytes       bigint,
-  duration_ms bigint NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ${AUDIT_TABLE}_time_idx ON ${AUDIT_TABLE} (time);
-`;
-
-const INSERT_SQL = `INSERT INTO ${AUDIT_TABLE}
-  (time, tool, path, source, destination, result, code, bytes, duration_ms)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
-
-/** The part of pg.Pool the store uses. */
-export interface AuditPool {
-  query(sql: string, values?: unknown[]): Promise<{ rows: unknown[] }>;
-  end(): Promise<void>;
+/** The part of PrismaClient the store uses (small enough to mock). */
+export interface AuditDb {
+  create(row: AuditRow): Promise<unknown>;
+  /** Connectivity check (SELECT 1). */
+  ping(): Promise<unknown>;
+  $disconnect(): Promise<void>;
 }
 
 /** PostgreSQL text cannot hold NUL, but rejected client paths are audited as sent. */
@@ -59,36 +53,44 @@ function text(value: string | undefined): string | null {
 }
 
 export class PostgresAuditStore implements AuditStore {
-  readonly #pool: AuditPool;
+  readonly #db: AuditDb;
   readonly #pending = new Set<Promise<void>>();
-  #schema: Promise<void> | undefined;
   #unsaved = 0;
   #lastWarning = Number.NEGATIVE_INFINITY;
   #closing: Promise<void> | undefined;
 
-  constructor(pool: AuditPool) {
-    this.#pool = pool;
+  constructor(db: AuditDb) {
+    this.#db = db;
   }
 
   static connect(url: Secret): PostgresAuditStore {
-    const pool = new pg.Pool({
-      connectionString: url.reveal(),
-      max: MAX_CONNECTIONS,
-      connectionTimeoutMillis: TIMEOUT_MS,
-      query_timeout: TIMEOUT_MS,
-      statement_timeout: TIMEOUT_MS,
+    const adapter = new PrismaPg(
+      {
+        connectionString: url.reveal(),
+        max: MAX_CONNECTIONS,
+        connectionTimeoutMillis: TIMEOUT_MS,
+        query_timeout: TIMEOUT_MS,
+        statement_timeout: TIMEOUT_MS,
+      },
+      {
+        // Without a listener, an error on an idle connection (database restart) ends the process.
+        onPoolError: (err) => {
+          log.warn("audit database connection lost", errorLogFields(err));
+        },
+      },
+    );
+    const prisma = new PrismaClient({ adapter, errorFormat: "minimal" });
+    return new PostgresAuditStore({
+      create: (data) => prisma.auditLog.create({ data, select: { id: true } }),
+      ping: () => prisma.$queryRaw`SELECT 1`,
+      $disconnect: () => prisma.$disconnect(),
     });
-    // Without a listener, an error on an idle connection (database restart) ends the process.
-    pool.on("error", (err) => {
-      log.warn("audit database connection lost", errorLogFields(err));
-    });
-    return new PostgresAuditStore(pool);
   }
 
-  /** Create the table early so that a wrong URL shows up at startup. Never rejects. */
+  /** Check the connection early so that a wrong URL shows up at startup. Never rejects. */
   async init(): Promise<void> {
     try {
-      await this.#ensureSchema();
+      await this.#db.ping();
     } catch (err) {
       log.warn("audit database is not ready; audit lines still go to stderr", errorLogFields(err));
     }
@@ -123,7 +125,7 @@ export class PostgresAuditStore implements AuditStore {
     });
     const drain = async (): Promise<void> => {
       await Promise.allSettled([...this.#pending]);
-      await this.#pool.end();
+      await this.#db.$disconnect();
     };
     try {
       await Promise.race([drain(), timeout]);
@@ -135,34 +137,17 @@ export class PostgresAuditStore implements AuditStore {
   }
 
   async #insert(record: AuditRecord): Promise<void> {
-    await this.#ensureSchema();
-    await this.#pool.query(INSERT_SQL, [
-      record.time,
-      record.tool,
-      text(record.path),
-      text(record.source),
-      text(record.destination),
-      record.result,
-      record.code ?? null,
-      record.bytes ?? null,
-      record.duration_ms,
-    ]);
-  }
-
-  /** Runs once; after a failure the next caller tries again. */
-  #ensureSchema(): Promise<void> {
-    this.#schema ??= this.#createSchema().catch((err: unknown) => {
-      this.#schema = undefined;
-      throw err;
+    await this.#db.create({
+      time: new Date(record.time),
+      tool: record.tool,
+      path: text(record.path),
+      source: text(record.source),
+      destination: text(record.destination),
+      result: record.result,
+      code: record.code ?? null,
+      bytes: record.bytes === undefined ? null : BigInt(Math.trunc(record.bytes)),
+      durationMs: BigInt(Math.trunc(record.duration_ms)),
     });
-    return this.#schema;
-  }
-
-  /** An existing table is left alone, so the database user then only needs INSERT. */
-  async #createSchema(): Promise<void> {
-    const { rows } = await this.#pool.query(TABLE_EXISTS_SQL);
-    if ((rows[0] as { present?: boolean } | undefined)?.present === true) return;
-    await this.#pool.query(CREATE_SQL);
   }
 
   #notSaved(err?: unknown): void {

@@ -151,7 +151,7 @@ Di container, berikan access key lewat env (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACC
 cd /path/to/mcp-s3
 nvm use            # opsional, membaca .nvmrc (Node 24)
 npm install
-npm run build      # tsc, menghasilkan dist/
+npm run build      # prisma generate (src/generated/prisma) lalu tsc, menghasilkan dist/
 ```
 
 Entrypoint hasil build adalah `dist/index.js`. Jalankan ulang `npm run build` setiap kali kode berubah, karena Claude menjalankan file di `dist/`.
@@ -605,11 +605,34 @@ Di mode HTTP, login yang gagal, berhasil, dan terkena rate limit dicatat terpisa
 
 Isi `MCP_S3_AUDIT_DATABASE_URL`, misalnya `postgresql://mcp_s3:<password>@127.0.0.1:5432/mcp_s3`. Untuk database lewat jaringan, tambahkan `?sslmode=verify-full`. Audit log tetap ditulis ke stderr.
 
-Tabel `mcp_s3_audit` (kolom `id`, `time`, `tool`, `path`, `source`, `destination`, `result`, `code`, `bytes`, `duration_ms`) dan index pada `time` dibuat otomatis jika belum ada. Jika tabel sudah ada, user database cukup punya izin `INSERT`.
+Tabel `mcp_s3_audit_log` (kolom `id`, `time`, `tool`, `path`, `source`, `destination`, `result`, `code`, `bytes`, `duration_ms`) dan index pada `time` dibuat oleh migrasi Prisma (`prisma/migrations`), **bukan** oleh server. Server hanya mengecek koneksi saat start (`SELECT 1`) dan mencatat `WARN` jika tabel belum ada atau database tidak terjangkau. User database untuk server cukup punya izin `INSERT` (dan `SELECT 1`); migrasi butuh user yang boleh membuat tabel.
+
+#### Migrasi
+
+Migrasi tidak pernah jalan otomatis saat server start. Jalankan sekali sebelum memakai `MCP_S3_AUDIT_DATABASE_URL`, dan lagi setelah upgrade yang menambah folder di `prisma/migrations`:
+
+- **Lokal:** `MCP_S3_AUDIT_DATABASE_URL=postgresql://... npm run db:migrate` (sama dengan `npx prisma migrate deploy`; Prisma CLI membaca variabel ini lewat `prisma.config.mjs`).
+- **Docker Compose** (`deploy/compose.yml`): `docker compose -f deploy/compose.yml --profile audit-db --profile migrate run --rm migrate`.
+- **Image saja:** `docker build --target migrate -t mcp-s3-migrate .` lalu `docker run --rm -e MCP_S3_AUDIT_DATABASE_URL=... mcp-s3-migrate`. Target default (`runtime`) tidak berisi Prisma CLI.
+- **Render:** isi `preDeployCommand` service dengan `npx prisma migrate deploy` jika service memakai target `migrate`, atau buat one-off job (Jobs) dari image `migrate` dengan command `npx prisma migrate deploy`. `MCP_S3_AUDIT_DATABASE_URL` harus tersedia di job itu. Jangan taruh migrasi di start command server.
+
+Mengubah skema: edit `prisma/schema.prisma`, lalu `npx prisma migrate dev --name <nama>` terhadap database development. Constraint `CHECK (result IN ('ok', 'error'))` dan kolom `id` bertipe `GENERATED ALWAYS AS IDENTITY` ada di SQL migrasi awal dan tidak bisa dinyatakan di schema Prisma; jangan hilang saat membuat migrasi baru. Client Prisma (`src/generated/prisma`) dibuat oleh `npm run build` atau `npm run db:generate`, tidak di-commit.
+
+#### Database dari versi lama
+
+Versi sebelum Prisma membuat tabel `mcp_s3_audit` sendiri. Tabel itu bukan `mcp_s3_audit_log`, jadi `migrate deploy` membuat tabel baru dan tabel lama tidak disentuh. Salin data jika perlu, lalu hapus tabel lama:
+
+```sql
+INSERT INTO mcp_s3_audit_log (time, tool, path, source, destination, result, code, bytes, duration_ms)
+SELECT time, tool, path, source, destination, result, code, bytes, duration_ms FROM mcp_s3_audit;
+DROP TABLE mcp_s3_audit;
+```
+
+Database kosong: cukup `migrate deploy`.
 
 ```sql
 -- Akses yang gagal dalam 24 jam terakhir
-SELECT time, tool, path, code FROM mcp_s3_audit
+SELECT time, tool, path, code FROM mcp_s3_audit_log
 WHERE result = 'error' AND time > now() - interval '1 day'
 ORDER BY time DESC;
 ```
@@ -623,7 +646,7 @@ Penyimpanan ke database bersifat best effort:
 - Karakter NUL di `path` disimpan sebagai teks `\u0000`.
 - Server tidak menghapus baris lama. Retensi diatur di sisi database.
 
-Di `deploy/compose.yml` ada service `postgres` opsional. Set `MCP_S3_AUDIT_DB_PASSWORD` di shell, isi `MCP_S3_AUDIT_DATABASE_URL` di `deploy/mcp-s3.env` dengan password yang sama, lalu jalankan `docker compose -f deploy/compose.yml --profile audit-db up -d --build`.
+Di `deploy/compose.yml` ada service `postgres` opsional. Set `MCP_S3_AUDIT_DB_PASSWORD` di shell, isi `MCP_S3_AUDIT_DATABASE_URL` di `deploy/mcp-s3.env` dengan password yang sama, jalankan migrasi sekali (lihat [Migrasi](#migrasi)), lalu `docker compose -f deploy/compose.yml --profile audit-db up -d --build`.
 
 ## Menjalankan test
 

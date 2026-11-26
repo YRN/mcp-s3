@@ -1,0 +1,29 @@
+// Audit log table (mcp_s3_audit_log). The CHECK constraint on "result" is not expressible in a Prisma
+// schema; it lives in the SQL of the initial migration. Do not "fix" it with migrate dev.
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+  engineType          = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  time        DateTime @db.Timestamptz(6)
+  tool        String
+  path        String?
+  source      String?
+  destination String?
+  result      String
+  code        String?
+  bytes       BigInt?
+  durationMs  BigInt   @map("duration_ms")
+
+  @@index([time], map: "mcp_s3_audit_log_time_idx")
+  @@map("mcp_s3_audit_log")
+}

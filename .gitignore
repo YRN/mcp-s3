@@ -15,3 +15,6 @@ coverage/
 # OS and editor noise
 .DS_Store
 *.log
+
+# Generated Prisma client (npm run db:generate, part of npm run build)
+src/generated/
