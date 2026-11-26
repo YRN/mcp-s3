@@ -3,7 +3,8 @@ import type { ErrorCode } from "./errors.js";
 /**
  * Structured audit log (PLAN.md section 9, Fase 2): exactly one JSON line per tool call,
  * written to stderr (stdout belongs to the MCP stdio protocol). Independent of
- * MCP_S3_LOG_LEVEL.
+ * MCP_S3_LOG_LEVEL. When a store is set (auditDb.ts, MCP_S3_AUDIT_DATABASE_URL) the same
+ * record is also saved there; stderr is written in either case.
  *
  * A line contains only: time, tool name, the relative path argument(s) as sent by the client,
  * the result ("ok" / "error"), the generic error code from errors.ts, the number of bytes read
@@ -55,6 +56,18 @@ export function setAuditSink(next: AuditSink | undefined): void {
   sink = next ?? stderrSink;
 }
 
+/** Additional destination for audit records. write() must return at once and never throw. */
+export interface AuditStore {
+  write(record: AuditRecord): void;
+}
+
+let store: AuditStore | undefined;
+
+/** Also save audit records to a store (e.g. PostgreSQL). Pass undefined to remove it. */
+export function setAuditStore(next: AuditStore | undefined): void {
+  store = next;
+}
+
 /** Relative path arguments of a tool call (only string values of the known argument names). */
 export function auditPaths(args: unknown): Partial<Record<AuditedPathArg, string>> {
   const paths: Partial<Record<AuditedPathArg, string>> = {};
@@ -96,6 +109,12 @@ export function startAudit(tool: string, args: unknown, now: () => number = Date
     };
     try {
       sink(JSON.stringify(record));
+    } catch {
+      // Auditing must never break a tool call.
+    }
+    // Separate try: a failing stderr sink must not stop the record reaching the store.
+    try {
+      store?.write(record);
     } catch {
       // Auditing must never break a tool call.
     }

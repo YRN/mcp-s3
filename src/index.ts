@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+import { setAuditStore } from "./audit.js";
+import { PostgresAuditStore } from "./auditDb.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
 import { errorLogFields } from "./errors.js";
 import { startHttpServer } from "./http/app.js";
@@ -62,12 +64,25 @@ async function main(): Promise<void> {
   await runStdio(config);
 }
 
+/**
+ * Save audit records to PostgreSQL too when MCP_S3_AUDIT_DATABASE_URL is set. The server does
+ * not wait for the database: an unreachable one only produces warnings.
+ */
+function startAuditStore(config: Config): PostgresAuditStore | undefined {
+  if (config.auditDatabaseUrl === undefined) return undefined;
+  const store = PostgresAuditStore.connect(config.auditDatabaseUrl);
+  setAuditStore(store);
+  void store.init();
+  return store;
+}
+
 async function runStdio(config: Config): Promise<void> {
   if (config.allowDelete && config.readOnly) {
     log.warn("MCP_S3_ALLOW_DELETE=true has no effect while MCP_S3_READ_ONLY=true");
   }
 
   const { server, registered, tools } = buildServer(config);
+  const auditStore = startAuditStore(config);
   const transport = new StdioServerTransport();
 
   let closing = false;
@@ -75,11 +90,12 @@ async function runStdio(config: Config): Promise<void> {
     if (closing) return;
     closing = true;
     log.info("shutting down", { reason });
-    server
+    void server
       .close()
       .catch((err: unknown) => {
         log.warn("error while closing", errorLogFields(err));
       })
+      .then(() => auditStore?.close())
       .finally(() => process.exit(0));
   };
 
@@ -105,6 +121,7 @@ async function runStdio(config: Config): Promise<void> {
     deleteTools: registered.delete,
     tools: tools.join(","),
     tokenKey: config.tokenKey === undefined ? "random per process" : "MCP_S3_TOKEN_KEY",
+    auditDatabase: auditStore !== undefined,
   });
 }
 
@@ -113,18 +130,23 @@ async function runHttp(config: Config, http: HttpConfig): Promise<void> {
   const storage = new Storage(createS3Client(config), config.bucket);
   const { registered, tools } = buildServer(config, { storage });
   const server = await startHttpServer({ config, http, storage });
+  const auditStore = startAuditStore(config);
 
   let closing = false;
   const shutdown = (reason: string): void => {
     if (closing) return;
     closing = true;
     log.info("shutting down", { reason });
-    server.close(() => process.exit(0));
+    // Pending audit rows get a bounded time to be saved before the process exits.
+    const exit = (): void => {
+      void Promise.resolve(auditStore?.close()).finally(() => process.exit(0));
+    };
+    server.close(exit);
     server.closeIdleConnections();
     // In-flight requests get a moment to finish, then the process exits regardless.
     setTimeout(() => {
       server.closeAllConnections();
-      process.exit(0);
+      exit();
     }, 5_000).unref();
   };
   process.on("SIGINT", () => {
@@ -149,6 +171,7 @@ async function runHttp(config: Config, http: HttpConfig): Promise<void> {
     dynamicRegistration: http.dynamicRegistration,
     trustProxyHops: http.trustProxyHops,
     tokenKey: "MCP_S3_TOKEN_KEY",
+    auditDatabase: auditStore !== undefined,
   });
 
   if (!isLoopbackBindHost(http.host) && http.publicUrl.protocol === "http:") {

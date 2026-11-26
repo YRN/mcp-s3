@@ -185,6 +185,7 @@ node --env-file=.env dist/index.js
 | `MCP_S3_MAX_LIST_KEYS` | tidak | `200` | Batas entri per halaman `list_objects` dan hasil `search_objects`; maksimum `1000` |
 | `MCP_S3_TRANSPORT` | tidak | `stdio` | `stdio` atau `http` (Streamable HTTP + OAuth, lihat [Mode HTTP (remote)](#mode-http-remote)) |
 | `MCP_S3_LOG_LEVEL` | tidak | `INFO` | `DEBUG`, `INFO`, `WARN`, atau `ERROR` (tidak case-sensitive). Log selalu ke stderr. Tidak mempengaruhi [audit log](#audit-log) |
+| `MCP_S3_AUDIT_DATABASE_URL` | tidak | - | **Secret.** URL `postgresql://`. Jika diisi, [audit log](#audit-log) juga disimpan ke PostgreSQL |
 | `MCP_S3_TOKEN_KEY` | wajib jika `http` | kunci acak per proses (stdio) | **Secret.** Kunci AES-256-GCM 32 byte dalam base64. Mengenkripsi `next_token`; di mode HTTP juga sumber kunci OAuth (lewat HKDF). Buat sekali dengan `openssl rand -base64 32` lalu simpan |
 
 Variabel khusus mode HTTP (`MCP_S3_TRANSPORT=http`). Tidak dibaca di mode stdio.
@@ -579,7 +580,7 @@ Mencabut akses:
 
 ## Audit log
 
-Setiap pemanggilan tool menghasilkan tepat satu baris JSON di stderr, di mode stdio maupun HTTP. Audit log selalu aktif dan tidak dipengaruhi `MCP_S3_LOG_LEVEL`. Di Docker, baris ini muncul di `docker logs`.
+Setiap pemanggilan tool menghasilkan tepat satu baris JSON di stderr, di mode stdio maupun HTTP. Baris yang sama bisa [disimpan juga ke PostgreSQL](#menyimpan-ke-postgresql). Audit log selalu aktif dan tidak dipengaruhi `MCP_S3_LOG_LEVEL`. Di Docker, baris ini muncul di `docker logs`.
 
 ```json
 {"type":"audit","time":"2026-11-26T10:00:00.000Z","tool":"read_object","path":"reports/q1.csv","result":"ok","bytes":2048,"duration_ms":12}
@@ -600,18 +601,42 @@ Audit log tidak pernah berisi nama bucket, root prefix, key S3 lengkap, isi file
 
 Di mode HTTP, login yang gagal, berhasil, dan terkena rate limit dicatat terpisah sebagai log biasa (`login failed`, `login succeeded`, `login rate limited`) dengan IP client. Client secret yang salah dan request yang terkena rate limit client secret juga dicatat (`client authentication failed`, `client authentication rate limited`) dengan IP client, tanpa client ID atau secret.
 
+### Menyimpan ke PostgreSQL
+
+Isi `MCP_S3_AUDIT_DATABASE_URL`, misalnya `postgresql://mcp_s3:<password>@127.0.0.1:5432/mcp_s3`. Untuk database lewat jaringan, tambahkan `?sslmode=verify-full`. Audit log tetap ditulis ke stderr.
+
+Tabel `mcp_s3_audit` (kolom `id`, `time`, `tool`, `path`, `source`, `destination`, `result`, `code`, `bytes`, `duration_ms`) dan index pada `time` dibuat otomatis jika belum ada. Jika tabel sudah ada, user database cukup punya izin `INSERT`.
+
+```sql
+-- Akses yang gagal dalam 24 jam terakhir
+SELECT time, tool, path, code FROM mcp_s3_audit
+WHERE result = 'error' AND time > now() - interval '1 day'
+ORDER BY time DESC;
+```
+
+Penyimpanan ke database bersifat best effort:
+
+- Tool tidak menunggu database. Server tetap start dan tool tetap jalan walau database mati.
+- Baris yang gagal disimpan **tidak dicoba ulang**. Salinannya hanya ada di stderr, dan server menulis `WARN` paling sering sekali per menit.
+- Paling banyak 1000 baris boleh menunggu database; selebihnya tidak disimpan.
+- Saat shutdown, server menunggu baris yang tertunda paling lama 3 detik.
+- Karakter NUL di `path` disimpan sebagai teks `\u0000`.
+- Server tidak menghapus baris lama. Retensi diatur di sisi database.
+
+Di `deploy/compose.yml` ada service `postgres` opsional. Set `MCP_S3_AUDIT_DB_PASSWORD` di shell, isi `MCP_S3_AUDIT_DATABASE_URL` di `deploy/mcp-s3.env` dengan password yang sama, lalu jalankan `docker compose -f deploy/compose.yml --profile audit-db up -d --build`.
+
 ## Menjalankan test
 
 | Perintah | Isi | Butuh |
 | --- | --- | --- |
 | `npm test` | Unit test (`test/unit`): path jail, config, handler tool dengan S3 di-mock | Tidak butuh Docker atau akun AWS |
-| `npm run test:int` | `docker compose up -d --wait`, lalu integration test (`test/integration`) ke MinIO, termasuk uji policy least-privilege | Docker |
+| `npm run test:int` | `npm run build`, `docker compose up -d --wait`, lalu integration test (`test/integration`) ke MinIO dan PostgreSQL, termasuk uji policy least-privilege | Docker |
 | `npm run test:e2e` | `npm run build`, MinIO, lalu e2e (`test/e2e`): menjalankan `dist/index.js` lewat MCP client stdio | Docker |
 | `npm run test:all` | Ketiganya berurutan | Docker |
 | `npm run lint` | ESLint, lalu `tsc --noEmit` untuk `src/` dan `test/` | - |
 | `npm run minio:down` | Menghentikan MinIO dan menghapus volume-nya | Docker |
 
-MinIO dari `docker-compose.yml` hanya listen di `127.0.0.1:19000`, datanya di tmpfs (kosong setiap start), dan setiap file test membuat bucket unik sendiri. Test tidak pernah menyentuh AWS. Variabel `MINIO_PORT`, `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, dan `MINIO_IMAGE` bisa dipakai untuk mengganti port, endpoint, credential admin test, atau image MinIO.
+PostgreSQL test listen di `127.0.0.1:19432` (ganti dengan `POSTGRES_PORT`). MinIO dari `docker-compose.yml` hanya listen di `127.0.0.1:19000`, datanya di tmpfs (kosong setiap start), dan setiap file test membuat bucket unik sendiri. Test tidak pernah menyentuh AWS. Variabel `MINIO_PORT`, `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, dan `MINIO_IMAGE` bisa dipakai untuk mengganti port, endpoint, credential admin test, atau image MinIO.
 
 ## Daftar tool
 

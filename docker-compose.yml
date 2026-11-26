@@ -1,4 +1,4 @@
-# MinIO for integration and e2e tests (npm run test:int / test:e2e).
+# MinIO and PostgreSQL for integration and e2e tests (npm run test:int / test:e2e).
 #
 # The official minio/minio images are no longer published for the community edition, so this
 # uses pgsty/minio, a maintained build of the same AGPL MinIO server (ships minio + mc).
@@ -24,6 +24,25 @@ services:
       - /data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Audit log database. Data on tmpfs, like MinIO.
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_USER: mcp_s3
+      POSTGRES_PASSWORD: mcp-s3-test-secret
+      POSTGRES_DB: mcp_s3
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-19432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1: the temporary server used during initialization does not listen on TCP.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "mcp_s3", "-d", "mcp_s3"]
       interval: 2s
       timeout: 3s
       retries: 30

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { hasControlChar, S3_MAX_KEY_BYTES } from "./paths.js";
+import { Secret } from "./secret.js";
 import { parseTokenKey } from "./tokens.js";
 
 /** S3 limits a single ListObjectsV2 page to 1000 keys. */
@@ -109,6 +110,11 @@ const EnvSchema = z.object({
       return key;
     })
     .optional(),
+  // Secret: the URL carries the database password, so it is wrapped and never echoed.
+  MCP_S3_AUDIT_DATABASE_URL: z
+    .url({ protocol: /^postgres(ql)?$/, error: "MCP_S3_AUDIT_DATABASE_URL must be a postgres:// or postgresql:// URL" })
+    .transform((value) => new Secret(value))
+    .optional(),
 }).superRefine((env, ctx) => {
   if (env.MCP_S3_TRANSPORT !== "http") return;
   if (env.MCP_S3_TOKEN_KEY === undefined) {
@@ -154,6 +160,8 @@ const ConfigSchema = EnvSchema.transform((env) => ({
    * configured": stdio mode then uses a random key per process (tokens.ts).
    */
   tokenKey: env.MCP_S3_TOKEN_KEY,
+  /** PostgreSQL connection URL for the audit log. undefined means audit lines go to stderr only. */
+  auditDatabaseUrl: env.MCP_S3_AUDIT_DATABASE_URL,
 }));
 
 export type Config = z.infer<typeof ConfigSchema>;

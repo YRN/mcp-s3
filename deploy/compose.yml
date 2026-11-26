@@ -40,6 +40,22 @@ services:
     networks:
       - internal
 
+  # Optional audit log database: add `--profile audit-db`, set MCP_S3_AUDIT_DB_PASSWORD in the
+  # shell (like MCP_S3_DOMAIN), and set MCP_S3_AUDIT_DATABASE_URL in mcp-s3.env (see
+  # mcp-s3.env.example). Not published; only reachable on the internal network.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["audit-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcp_s3
+      POSTGRES_PASSWORD: ${MCP_S3_AUDIT_DB_PASSWORD:-}
+      POSTGRES_DB: mcp_s3
+    volumes:
+      - audit_data:/var/lib/postgresql/data
+    networks:
+      - internal
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -63,5 +79,6 @@ networks:
   internal: {}
 
 volumes:
+  audit_data: {}
   caddy_data: {}
   caddy_config: {}

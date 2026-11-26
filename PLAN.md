@@ -28,6 +28,7 @@ Membangun MCP (Model Context Protocol) server yang:
 | Package manager | `npm` | Default Node, tanpa setup tambahan |
 | Build / dev | `tsc` ke `dist/`, `tsx` untuk dev | Output JS biasa, dijalankan dengan `node` |
 | Test | `vitest` + `aws-sdk-client-mock`, MinIO (Docker) untuk integrasi | Unit test tanpa akun AWS; integrasi dengan perilaku S3 nyata |
+| Audit database | PostgreSQL lewat `pg` (opsional, keputusan 2026-11-26) | Audit awet dan bisa di-query; stderr tetap ditulis |
 | Lint | `eslint` + `typescript-eslint` | Konsistensi kode |
 | Transport | stdio (utama), Streamable HTTP (opsional) | stdio untuk Claude Code/Desktop, HTTP untuk claude.ai connector |
 
@@ -162,6 +163,7 @@ Catatan:
 | `MCP_S3_MAX_LIST_KEYS` | tidak | `200` | Batas item per halaman list |
 | `MCP_S3_TRANSPORT` | tidak | `stdio` | `stdio` atau `http` |
 | `MCP_S3_LOG_LEVEL` | tidak | `INFO` | Log ke stderr |
+| `MCP_S3_AUDIT_DATABASE_URL` | tidak | - | URL PostgreSQL untuk menyimpan audit log selain ke stderr. Rahasia |
 | `MCP_S3_TOKEN_KEY` | wajib jika `http` | acak per proses (stdio) | Kunci AES-256-GCM 32 byte (base64) untuk mengenkripsi `next_token`, juga sumber kunci OAuth lewat HKDF. Wajib di mode HTTP supaya token tetap valid setelah restart dan di semua instance. Rahasia: jangan di-commit atau di-log |
 | `MCP_S3_HTTP_HOST` | tidak | `127.0.0.1` | Alamat bind mode HTTP |
 | `MCP_S3_HTTP_PORT` | tidak | `3000` | Port mode HTTP (1-65535) |
@@ -248,7 +250,7 @@ mcp-s3/
 ├── package.json         # "type": "module", "bin": { "mcp-s3": "dist/index.js" }
 ├── tsconfig.json        # strict, module/moduleResolution: NodeNext, outDir: dist
 ├── vitest.config.ts
-├── docker-compose.yml   # MinIO untuk integration test
+├── docker-compose.yml   # MinIO dan PostgreSQL untuk integration test
 ├── .env.example
 ├── iam-policy.example.json
 ├── Dockerfile           # multi-stage, user non-root, mode HTTP
@@ -260,7 +262,8 @@ mcp-s3/
 │   ├── storage.ts       # wrapper S3Client: list, head, get (range), put, copy, delete
 │   ├── server.ts        # createServer(config): McpServer + registrasi tool kondisional
 │   ├── errors.ts        # map error S3 ke pesan generik (NotFound, AccessDenied, ...)
-│   ├── audit.ts         # audit log terstruktur (JSON) ke stderr / file (Fase 2)
+│   ├── audit.ts         # audit log terstruktur (JSON) ke stderr (Fase 2)
+│   ├── auditDb.ts       # simpan audit log ke PostgreSQL (opsional)
 │   ├── logger.ts        # logger berlevel ke stderr (MCP_S3_LOG_LEVEL)
 │   ├── glob.ts          # matcher glob dengan waktu terbatas untuk search_objects
 │   ├── tokens.ts        # TokenCodec: next_token stateless AES-256-GCM
@@ -300,7 +303,7 @@ Script `package.json`:
 | `build` | `tsc` |
 | `dev` | `tsx src/index.ts` |
 | `test` | `vitest run test/unit` (tanpa Docker) |
-| `test:int` | `docker compose up -d --wait && vitest run test/integration` |
+| `test:int` | `npm run build && docker compose up -d --wait && vitest run test/integration` |
 | `test:e2e` | `npm run build && docker compose up -d --wait && vitest run test/e2e` |
 | `test:all` | `npm test && npm run test:int && npm run test:e2e` |
 | `lint` | `eslint . && tsc --noEmit && tsc --noEmit -p test` |
@@ -434,6 +437,7 @@ Keputusan 2026-11-26: versi ini tetap read-only. Tool write dan delete ditunda (
 - [ ] (Ditunda) Tool delete (`delete_object`, `move_object`) di balik `MCP_S3_ALLOW_DELETE`.
 - [x] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`).
 - [x] `audit.ts`: log JSON per pemanggilan tool (waktu, tool, path relatif, hasil, ukuran).
+- [x] `auditDb.ts` (keputusan 2026-11-26): audit log disimpan ke PostgreSQL **dan** stderr, aktif jika `MCP_S3_AUDIT_DATABASE_URL` diisi. Best effort: tool tidak menunggu database, baris yang gagal disimpan tidak dicoba ulang.
 - [x] Unit test tool dengan `aws-sdk-client-mock`.
 - [x] Integration test ke MinIO untuk semua tool, termasuk kasus prefix collision.
 
