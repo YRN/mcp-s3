@@ -1,0 +1,21 @@
+# Only package.json, package-lock.json, tsconfig.json, and src/ are needed to build the image.
+node_modules
+dist
+coverage
+.vitest
+.git
+.gitignore
+.claude
+test
+deploy
+docker-compose.yml
+vitest.config.ts
+eslint.config.js
+*.md
+*.log
+.DS_Store
+
+# Secrets must never end up in the build context
+.env
+.env.*
+**/*.env

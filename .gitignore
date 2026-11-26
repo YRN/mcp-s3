@@ -1,0 +1,17 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.vitest/
+
+# Secrets: never commit credentials or local env files
+.env
+.env.*
+!.env.example
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS and editor noise
+.DS_Store
+*.log

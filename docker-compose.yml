@@ -1,0 +1,30 @@
+# MinIO for integration and e2e tests (npm run test:int / test:e2e).
+#
+# The official minio/minio images are no longer published for the community edition, so this
+# uses pgsty/minio, a maintained build of the same AGPL MinIO server (ships minio + mc).
+# The tag is pinned by digest (multi-arch index digest, verified against Docker Hub with
+# `docker buildx imagetools inspect`). Override with MINIO_IMAGE for another MinIO image.
+#
+# Data lives on tmpfs: every `docker compose up` starts empty, and tests use a unique bucket
+# per run anyway. Stop with `npm run minio:down`.
+name: mcp-s3-test
+
+services:
+  minio:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mcp-s3-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mcp-s3-admin-secret}
+      MINIO_BROWSER: "off"
+    ports:
+      # Bound to localhost only. Tests read MINIO_ENDPOINT (default http://127.0.0.1:19000).
+      - "127.0.0.1:${MINIO_PORT:-19000}:9000"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s

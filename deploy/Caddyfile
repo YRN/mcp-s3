@@ -1,0 +1,40 @@
+# HTTPS reverse proxy for mcp-s3 (see compose.yml). Caddy obtains and renews the certificate
+# for {$MCP_S3_DOMAIN} automatically and redirects http:// to https://.
+{$MCP_S3_DOMAIN} {
+	# Only the paths the server actually serves are forwarded.
+	@mcp path /mcp /authorize /login /token /register /revoke /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
+	handle @mcp {
+		reverse_proxy mcp-s3:3000 {
+			# Do not buffer responses (Streamable HTTP may stream).
+			flush_interval -1
+		}
+	}
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	log {
+		output stderr
+		# Request logs must not contain tokens: drop the Authorization and Cookie headers, the
+		# Referer header (POST /login carries the /authorize query with state and code_challenge),
+		# the OAuth parameters in query strings, and the Location / Set-Cookie response headers
+		# (the post-login redirect carries the authorization code and state).
+		format filter {
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			request>headers>Referer delete
+			resp_headers>Location delete
+			resp_headers>Set-Cookie delete
+			request>uri query {
+				delete code
+				delete state
+				delete code_challenge
+			}
+		}
+	}
+}

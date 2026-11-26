@@ -1,0 +1,12 @@
+{
+  // Type-checking project for test files (used by `tsc -p test` and by typescript-eslint's
+  // project service for files under test/). The root tsconfig.json only covers src/ and
+  // is what `npm run build` uses, so it stays untouched.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts", "../vitest.config.ts"]
+}
